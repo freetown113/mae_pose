@@ -43,10 +43,26 @@ class Dataset:
         assert np.array_equal(patch, points), True
 
         return joints
+    
+    def get_joints_compex(self, patch):
+        idxs = [[1, 2, 3], [4, 5, 6], [1, 0, 4],
+                [0, 7, 8], [8, 9, 10], [11, 8, 14],
+                [14, 15, 16], [11, 12, 13]]
+        
+        joints = np.zeros((self.seq_length, len(idxs), 3, self.pts), dtype=np.float32)
+        for i in range(joints.shape[1]):
+            joints[:, i, 0, :] = patch[:, idxs[i][0], :]
+            joints[:, i, 1, :] = patch[:, idxs[i][1], :]
+            joints[:, i, 2, :] = patch[:, idxs[i][2], :]
+
+        points = get_poinsts_from_joints_complex(joints, self.skeleton, self.seq_length, joints.shape[1], self.pts).transpose((2,0,1))
+        assert np.array_equal(patch, points), True
+
+        return joints
 
     def wrap_data(self):
         for k in self.data.keys():
-            self.data[k] = self.get_joints(np.asarray(self.data[k], dtype=np.float32))
+            self.data[k] = self.get_joints_compex(np.asarray(self.data[k], dtype=np.float32))
 
     def compute_variance(self, tricked=False):
         if tricked:
@@ -57,11 +73,39 @@ class Dataset:
         return np.var((data - self.min_val) / (self.max_val - self.min_val))
     
 
+def get_poinsts_from_joints_complex(patch, num_pts, seq_length, num_joints, pts):
+    ''' idxs = [[1, 2, 3], [4, 5, 6], [1, 0, 4],
+                [0, 7, 8], [8, 9, 10], [11, 8, 14],
+                [14, 15, 16], [11, 12, 13]]
+    '''
+    patch = np.reshape(patch, (seq_length, num_joints, -1, pts))
+    points = np.zeros((seq_length, num_pts, pts), dtype=np.float32)
+    points[:, 0, :] = patch[:, 2, 1, :]
+    points[:, 1, :] = patch[:, 0, 0, :]
+    points[:, 2, :] = patch[:, 0, 1, :]
+    points[:, 3, :] = patch[:, 0, 2, :]
+    points[:, 4, :] = patch[:, 1, 0, :]
+    points[:, 5, :] = patch[:, 1, 1, :]
+    points[:, 6, :] = patch[:, 1, 2, :]
+    points[:, 7, :] = patch[:, 3, 1, :]
+    points[:, 8, :] = patch[:, 4, 0, :]
+    points[:, 9, :] = patch[:, 4, 1, :]
+    points[:, 10, :] = patch[:, 4, 2, :]
+    points[:, 11, :] = patch[:, 7, 0, :]
+    points[:, 12, :] = patch[:, 7, 1, :]
+    points[:, 13, :] = patch[:, 7, 2, :]
+    points[:, 14, :] = patch[:, 6, 0, :]
+    points[:, 15, :] = patch[:, 6, 1, :]
+    points[:, 16, :] = patch[:, 6, 2, :]
+    return points.transpose((1,2,0))
+
+
 def get_poinsts_from_joints(patch, num_pts, seq_length, num_joints, pts):
-    idxs = [[0, 1], [1, 2], [2, 3], [0, 4], 
+    '''    idxs = [[0, 1], [1, 2], [2, 3], [0, 4], 
             [4, 5], [5, 6], [0, 7], [7, 8], 
             [8, 9], [8, 11], [8, 14], [9, 10], 
             [11, 12], [12, 13], [14, 15], [15, 16]]
+    '''
     patch = np.reshape(patch, (seq_length, num_joints, -1, pts))
     points = np.zeros((seq_length, num_pts, pts), dtype=np.float32)
     points[:, 0, :] = patch[:, 0, 0, :]

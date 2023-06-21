@@ -7,7 +7,7 @@ import pickle
 
 from utils import generate_masked_sequence, motion2video_3d
 from optim_grad import MaskedAE
-from dataset import get_loader_train_test, get_poinsts_from_joints
+from dataset import get_loader_train_test, get_poinsts_from_joints_complex
 
 from absl import app
 from absl import flags
@@ -19,11 +19,12 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string('data_path', '/capital/datasets/BEHAVE_updated', 'Location of the dataset')
 flags.DEFINE_integer('seq_length', 64, 'image spatial size', lower_bound=32)
-flags.DEFINE_integer('batch', 100, 'batch_size', lower_bound=1)
+flags.DEFINE_integer('batch', 128, 'batch_size', lower_bound=1)
 flags.DEFINE_integer('num_training_updates', int(1e6), 'number of steps to pass', lower_bound=1000)
 flags.DEFINE_integer('skeleton_points', 17, 'size of a token', lower_bound=1)
-flags.DEFINE_integer('skeleton_joints', 16, 'size of a token', lower_bound=1)
+flags.DEFINE_integer('skeleton_joints', 8, 'size of a token', lower_bound=1)
 flags.DEFINE_integer('num_points', 3, 'size of a token', lower_bound=1)
+flags.DEFINE_integer('complex', 3, 'size of a token', lower_bound=1)
 flags.DEFINE_integer('enc_projection_dim', 128, 'latent space', lower_bound=32)
 flags.DEFINE_integer('enc_num_heads', 4, 'size of a token', lower_bound=1)
 flags.DEFINE_integer('enc_layers', 6, 'size of a token', lower_bound=1)
@@ -101,7 +102,7 @@ def train(argv):
         'enc_transformer_units': [FLAGS.enc_projection_dim*2, FLAGS.enc_projection_dim],
         'dec_transformer_units': [FLAGS.dec_projection_dim*2, FLAGS.dec_projection_dim],
         'num_patches': FLAGS.seq_length * FLAGS.skeleton_joints,
-        'patch_dim': FLAGS.num_points * 2, #* FLAGS.skeleton_points,
+        'patch_dim': FLAGS.num_points * FLAGS.complex, 
         'variance': variance
         })
     model = MaskedAE(arguments)
@@ -135,24 +136,24 @@ def train(argv):
         masked = test_loss['patches'][idx]
 
         masked = ((masked + 1.0) / 2.0) * (max_val - min_val) + min_val
-        masked = get_poinsts_from_joints(masked, FLAGS.skeleton_points, 
+        masked = get_poinsts_from_joints_complex(masked, FLAGS.skeleton_points, 
                                             FLAGS.seq_length, 
                                             FLAGS.skeleton_joints, 
                                             FLAGS.num_points)
         outputs = ((test_loss['decoder_outputs'][idx] + 1.0) / 2.0) * (max_val - min_val) + min_val
-        outputs = get_poinsts_from_joints(outputs, FLAGS.skeleton_points, 
+        outputs = get_poinsts_from_joints_complex(outputs, FLAGS.skeleton_points, 
                                             FLAGS.seq_length, 
                                             FLAGS.skeleton_joints, 
                                             FLAGS.num_points)
         original = ((pose[idx] + 1.0) / 2.0) * (max_val - min_val) + min_val
-        original = get_poinsts_from_joints(original, FLAGS.skeleton_points, 
+        original = get_poinsts_from_joints_complex(original, FLAGS.skeleton_points, 
                                             FLAGS.seq_length, 
                                             FLAGS.skeleton_joints, 
                                             FLAGS.num_points)
         motion2video_3d(outputs, 
                         masked, 
                         original, 
-                        f'./output_exp/outputs_epoch_{i}.mp4', 
+                        f'./output_complex/outputs_epoch_{i}.mp4', 
                         fps=7, 
                         unmasked_indexes=test_loss['unmask_indices'][idx]
                         )
