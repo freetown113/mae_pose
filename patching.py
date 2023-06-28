@@ -1,6 +1,7 @@
 import functools
 from typing import Any, NamedTuple, Callable
 import os
+from operator import getitem
 
 import haiku as hk
 import jax
@@ -58,7 +59,7 @@ class PatchEncoder(hk.Module):
 
     def build(self, input_shape):
         (_, self.num_patches, self.patch_area) = input_shape
-
+       
         self.projection = hk.Linear(self.projection_dim)
 
         self.position_embedding = hk.Embed(self.num_patches, self.projection_dim, 
@@ -68,7 +69,7 @@ class PatchEncoder(hk.Module):
 
         self.num_mask = int(self.mask_proportion * self.num_patches)
 
-    def __call__(self, patches):
+    def __call__(self, patches, mask_indices, unmask_indices):
         if not self.builded:
            self.build(patches.shape)
            self.builded = True
@@ -86,25 +87,29 @@ class PatchEncoder(hk.Module):
             self.projection(patches) + pos_embeddings
         )  # (B, num_patches, projection_dim)
 
-        mask_indices, unmask_indices = self.get_random_indices(batch_size)
+        pad_unmask_indices = unmask_indices != -1
+        pad_mask_indices = mask_indices != -1
 
-        unmasked_embeddings = jnp.take_along_axis(
-            patch_embeddings, jnp.expand_dims(unmask_indices, axis=-1), axis=1
-        )   # (B, unmask_numbers, projection_dim)
+        unmasked_embeddings = jax.vmap(getitem)(patch_embeddings, unmask_indices)
+        # unmasked_embeddings = jnp.take_along_axis(
+        #     patch_embeddings, jnp.expand_dims(unmask_indices, axis=-1), axis=1
+        # )   # (B, unmask_numbers, projection_dim)
 
-        unmasked_positions = jnp.take_along_axis(
-            pos_embeddings, jnp.expand_dims(unmask_indices, axis=-1), axis=1
-        )# (B, unmask_numbers, projection_dim)
+        unmasked_positions = jax.vmap(getitem)(pos_embeddings, unmask_indices)
+        # unmasked_positions = jnp.take_along_axis(
+        #     pos_embeddings, jnp.expand_dims(unmask_indices, axis=-1), axis=1
+        # )# (B, unmask_numbers, projection_dim)
 
-        masked_positions = jnp.take_along_axis(
-            pos_embeddings, jnp.expand_dims(mask_indices, axis=-1), axis=1
-        )   # (B, mask_numbers, projection_dim)
+        masked_positions = jax.vmap(getitem)(pos_embeddings, mask_indices)
+        # masked_positions = jnp.take_along_axis(
+        #     pos_embeddings, jnp.expand_dims(mask_indices, axis=-1), axis=1
+        # )   # (B, mask_numbers, projection_dim)
 
-        mask_tokens = jnp.repeat(self.mask_token, repeats=self.num_mask, axis=0)
-
-        mask_tokens = jnp.repeat(
-            jnp.expand_dims(mask_tokens, axis=0), repeats=batch_size, axis=0
-        )
+        mask_tokens = jnp.tile(jnp.expand_dims(self.mask_token, axis=0), (batch_size, self.num_mask, 1))
+        # mask_tokens = jnp.repeat(self.mask_token, repeats=self.num_mask, axis=0)
+        # mask_tokens = jnp.repeat(
+        #     jnp.expand_dims(mask_tokens, axis=0), repeats=batch_size, axis=0
+        # )
 
         # Get the masked embeddings for the tokens.
         masked_embeddings = self.projection(mask_tokens) + masked_positions
@@ -115,12 +120,26 @@ class PatchEncoder(hk.Module):
             unmasked_positions,  # Added to the encoder outputs.
             mask_indices,  # The indices that were masked.
             unmask_indices,  # The indices that were unmaksed.
+            pad_unmask_indices, 
+            pad_mask_indices
         )
 
-    def get_random_indices(self, batch_size):
-        rand_indices = np.argsort(
-            np.random.uniform(size=(batch_size, self.num_patches)), axis=-1
-        )
-        mask_indices = rand_indices[:, : self.num_mask]
-        unmask_indices = rand_indices[:, self.num_mask :]
-        return mask_indices, unmask_indices
+    # def get_random_indices(self, orig_length):
+    #     mask_indices = []
+    #     unmask_indices = []
+    #     masked_max = int(self.num_patches * self.mask_proportion)
+    #     unmasked_max = int(self.num_patches * (1 - self.mask_proportion))
+    #     self.num_mask = masked_max
+    #     for length in orig_length:
+    #         rand_indices = np.argsort(
+    #             np.random.uniform(size=length), axis=-1
+    #         )
+    #         num_mask = int(self.mask_proportion * length)
+    #         mask_indices.append(jax.lax.pad(rand_indices[:num_mask], 
+    #                                           padding_config=[(0, masked_max - num_mask, 0)], 
+    #                                           padding_value=-1))
+    #         unmask_indices.append(jax.lax.pad(rand_indices[num_mask:], 
+    #                                           padding_config=[(0, unmasked_max - int(length) + num_mask, 0)], 
+    #                                           padding_value=-1))
+
+    #     return np.stack(mask_indices), np.stack(unmask_indices)

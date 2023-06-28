@@ -5,11 +5,13 @@ import jax.numpy as jnp
 import functools
 
 from patching import PatchEncoder
-from models import Encoder, Decoder, MLP
+from models import Encoder, Decoder
+from operator import getitem
 
 
 def create_forward_fn(fns, args):
    def fwd_pass(patches):
+        patches, pad_masks, mask_indices, unmask_indices, labels = patches
 
         (
             unmasked_embeddings,
@@ -17,25 +19,38 @@ def create_forward_fn(fns, args):
             unmasked_positions,
             mask_indices,
             unmask_indices,
-        ) = fns['PatchEncoder'](**args)(patches)
+            pad_unmasked_mask, 
+            pad_masked_mask
+        ) = fns['PatchEncoder'](**args)(patches, mask_indices, unmask_indices)
 
-        encoder_outputs = fns['Encoder'](**args)(unmasked_embeddings)
+        encoder_outputs = fns['Encoder'](**args)(unmasked_embeddings, pad_unmasked_mask)
 
         encoder_outputs = encoder_outputs + unmasked_positions
         decoder_inputs = jnp.concatenate([encoder_outputs, masked_embeddings], axis=1)
 
-        decoder_outputs = fns['Decoder'](**args)(decoder_inputs)
+        decoder_outputs, logits, classifier_loss = fns['Decoder'](**args)(decoder_inputs, 
+                                                 jnp.concatenate([pad_unmasked_mask, pad_masked_mask], axis=1),
+                                                 labels)
 
-        masked_input = jnp.take_along_axis(patches, jnp.expand_dims(mask_indices, axis=-1), axis=1)
-        reconstruced_masked_input = jnp.take_along_axis(decoder_outputs, jnp.expand_dims(mask_indices, axis=-1), axis=1)
+        masked_input = jax.vmap(getitem)(patches, mask_indices)
+        reconstruced_masked_input = jax.vmap(getitem)(decoder_outputs, mask_indices)
+        # masked_input = jnp.take_along_axis(patches, jnp.expand_dims(mask_indices, axis=-1), axis=1)
+        # reconstruced_masked_input = jnp.take_along_axis(decoder_outputs, jnp.expand_dims(mask_indices, axis=-1), axis=1)
 
-        total_loss = jnp.mean(jnp.square(masked_input - reconstruced_masked_input)) / args['variance']
+        masked_input = masked_input * jnp.tile(jnp.expand_dims(pad_masked_mask, axis=-1), (1, 1, args['patch_dim']))
+        reconstruced_masked_input = reconstruced_masked_input * jnp.tile(jnp.expand_dims(pad_masked_mask, axis=-1), (1, 1, args['patch_dim']))
+
+        reconstruction_loss = jnp.mean(jnp.square(masked_input - reconstruced_masked_input)) / args['variance']
+
+        total_loss = reconstruction_loss + classifier_loss
 
         return total_loss, dict({
-            'total_loss': total_loss,
+            'reconst_loss': reconstruction_loss,
+            'classif_loss': classifier_loss,
             'decoder_outputs': decoder_outputs,
             'unmask_indices': unmask_indices,
-            'patches': patches
+            'patches': patches,
+            'logits': logits
         })
 
    return hk.transform(fwd_pass)

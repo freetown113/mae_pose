@@ -37,18 +37,24 @@ def get_img_from_fig(fig, dpi=120):
     return img
 
 
-def motion2video_3d(outputs, masked, original, save_path, fps=10, unmasked_indexes=None, keep_imgs = False):
+def motion2video_3d(outputs, masked, original, dataset, save_path, fps=10, unmasked_indexes=None, keep_imgs = False):
 #     motion: (17,3,N)
     videowriter = imageio.get_writer(save_path, fps=fps)
     # size = (608, 456)
-    size = (608, )
+    if dataset == 'ROSE':
+        size = (1080,)
+        indent = [100, 300, 500, 0, 0]
+    elif dataset == 'BEHAVE':
+        size = (608,)
+        indent = [100, 300, 500, 450, 400]
+
     outputs *= (min(size) / 2.0)
     masked *= (min(size) / 2.0)
     original *= (min(size) / 2.0)
 
-    outputs = outputs + np.expand_dims(np.array((100, 450, 400)), axis=[0,-1])
-    masked = masked + np.expand_dims(np.array((300, 450, 400)), axis=[0,-1])
-    original = original + np.expand_dims(np.array((500, 450, 400)), axis=[0,-1])
+    outputs = outputs + np.expand_dims(np.array((indent[0], *indent[-2:])), axis=[0,-1])
+    masked = masked + np.expand_dims(np.array((indent[1], *indent[-2:])), axis=[0,-1])
+    original = original + np.expand_dims(np.array((indent[2], *indent[-2:])), axis=[0,-1])
     vlen = outputs.shape[-1]
 
     joint_pairs = [[0, 1], [1, 2], [2, 3], [0, 4], [4, 5], [5, 6], [0, 7], [7, 8], [8, 9], [8, 11], [8, 14], [9, 10], [11, 12], [12, 13], [14, 15], [15, 16]]

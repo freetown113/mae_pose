@@ -1,11 +1,8 @@
 import numpy as np
 import torch
 import torchvision.transforms as trfs
-
-
-class Transforms:
-    def __init__(self, ):
-        pass
+import jax
+import jax.numpy as jnp
 
 
 class Dataset:
@@ -49,13 +46,14 @@ class Dataset:
                 [0, 7, 8], [8, 9, 10], [11, 8, 14],
                 [14, 15, 16], [11, 12, 13]]
         
-        joints = np.zeros((self.seq_length, len(idxs), 3, self.pts), dtype=np.float32)
+        seq_length = patch.shape[0]
+        joints = np.zeros((seq_length, len(idxs), 3, self.pts), dtype=np.float32)
         for i in range(joints.shape[1]):
             joints[:, i, 0, :] = patch[:, idxs[i][0], :]
             joints[:, i, 1, :] = patch[:, idxs[i][1], :]
             joints[:, i, 2, :] = patch[:, idxs[i][2], :]
 
-        points = get_poinsts_from_joints_complex(joints, self.skeleton, self.seq_length, joints.shape[1], self.pts).transpose((2,0,1))
+        points = get_poinsts_from_joints_complex(joints, self.skeleton, seq_length, joints.shape[1], self.pts).transpose((2,0,1))
         assert np.array_equal(patch, points), True
 
         return joints
@@ -128,10 +126,80 @@ def get_poinsts_from_joints(patch, num_pts, seq_length, num_joints, pts):
     return points.transpose((1,2,0))
 
 
-def collate_fn(input):
+def collate_array(input):
     out = np.stack(input)
     return np.reshape(out, (out.shape[0], np.prod(out.shape[1:3]), np.prod(out.shape[3:])))
 
+
+class TupleCollator(object):
+    def __init__(self, max_length, mask_portion, num_patches):
+        self.max_length = max_length
+        self.mask_proportion = mask_portion
+        self.num_patches = num_patches
+
+    def randon_sample(self, orig_length):
+        mask_indices = []
+        unmask_indices = []
+        masked_max = int(self.num_patches * self.mask_proportion)
+        unmasked_max = int(self.num_patches * (1 - self.mask_proportion))
+        self.num_mask = masked_max
+        for length in orig_length:
+            rand_indices = np.argsort(
+                np.random.uniform(size=length), axis=-1
+            )
+            num_mask = int(self.mask_proportion * length)
+            mask_indices.append(jax.lax.pad(rand_indices[:num_mask], 
+                                              padding_config=[(0, masked_max - num_mask, 0)], 
+                                              padding_value=-1))
+            unmask_indices.append(jax.lax.pad(rand_indices[num_mask:], 
+                                              padding_config=[(0, unmasked_max - int(length) + num_mask, 0)], 
+                                              padding_value=-1))
+
+        return jnp.stack(mask_indices), jnp.stack(unmask_indices)
+
+    def __call__(self, input):
+        labels = jnp.array([ t[1] for t in input ])
+
+        lengths = [ t[0].shape[0] * t[0].shape[1] for t in input ]
+        mask_indices, unmask_indices = self.randon_sample(lengths)
+
+        batch = [t[0] for t in input]
+        padded = [jax.lax.pad(el, padding_config=[(0, self.max_length - el.shape[0], 0), 
+                                                  (0, 0, 0), (0, 0, 0), (0, 0, 0)], 
+                                                  padding_value=0.0) for el in batch]
+
+        poses = jnp.stack(padded)
+        poses = jnp.reshape(poses, (poses.shape[0], np.prod(poses.shape[1:3]), np.prod(poses.shape[-2:])))
+        mask = (poses != 0)
+
+        return poses, mask, mask_indices, unmask_indices, labels, np.asarray(lengths, dtype=np.uint16)
+
+
+class DatasetRose(Dataset):
+    def __init__(self, data, pts, skeleton, seq_length, min_val, max_val, transforms=None):
+        self.data = data
+        self.pts = pts
+        self.skeleton = skeleton
+        self.transforms = transforms
+        self.seq_length = seq_length
+        self.min_val = min_val
+        self.max_val = max_val
+        self.wrap_data()
+
+    def wrap_data(self):
+        data = dict()
+        for key in self.data.keys():
+            data[key] = tuple([super().get_joints_compex(np.asarray(self.data[key][0], dtype=np.float32)), 
+                               np.array(int(self.data[key][1][1:]))])
+        self.data = data
+
+    def __getitem__(self, index):
+        pose, lable = self.data[index]
+        pose = self.transforms(pose)
+
+        return pose, lable
+
+        
 
 # def get_loader(data, cfg, max_val, min_val, aux_transform=False):
 #     print(f'Max/ min values is {max_val}/ {min_val}')
@@ -186,27 +254,36 @@ def get_loader_train_test(data, cfg, max_val, min_val, aux_transform=False):
     data_test = {i: data[idx] for i, idx in enumerate(idxs)}
     data_train = dict()
     cnt = 0
-    for idx in data.keys():
+    for idx in data.keys() if type(data) is dict else range(len(data)):
         if idx not in idxs:
             data_train[cnt] = data[idx]
             cnt += 1
 
-    traindata = Dataset(data_train, 
-                      cfg.num_points, 
-                      cfg.skeleton_points, 
-                      cfg.seq_length, 
-                      min_val, 
-                      max_val, 
-                      transforms=transf)
+    if cfg.dataset == 'ROSE':
+        DatasetClass = DatasetRose
+        collate_fn = TupleCollator(cfg.max_length, cfg.mask_proportion, cfg.max_length * cfg.skeleton_joints)
+    elif cfg.dataset == 'BEHAVE':
+        DatasetClass = Dataset
+        collate_fn = collate_array
+    else:
+        raise NotImplementedError(f'The dataset class is not implemented for the type you provide {cfg.dataset}')        
+
+    traindata = DatasetClass(data_train, 
+                             cfg.num_points, 
+                             cfg.skeleton_points, 
+                             cfg.seq_length, 
+                             min_val, 
+                             max_val, 
+                             transforms=transf)
     variance = traindata.compute_variance(True)
 
-    testdata = Dataset(data_test, 
-                      cfg.num_points, 
-                      cfg.skeleton_points, 
-                      cfg.seq_length, 
-                      min_val, 
-                      max_val, 
-                      transforms=transf)
+    testdata = DatasetClass(data_test, 
+                            cfg.num_points, 
+                            cfg.skeleton_points, 
+                            cfg.seq_length, 
+                            min_val, 
+                            max_val, 
+                            transforms=transf)
     
     loader_train = torch.utils.data.DataLoader(dataset=traindata,
                                             batch_size=cfg.batch, 
