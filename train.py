@@ -3,12 +3,12 @@ import jax.numpy as jnp
 import numpy as np
 from itertools import count
 import os
-import json
 import pickle
 
 from utils import generate_masked_sequence, motion2video_3d
 from optim_grad import MaskedAE
-from dataset import get_loader_train_test, get_poinsts_from_joints_complex
+from dataset import get_loader_train_test, get_poinsts_from_joints_complex, prepare_data
+from models import save, load
 
 from absl import app
 from absl import flags
@@ -39,54 +39,10 @@ flags.DEFINE_float('mask_proportion', 0.75, 'part of image square to mask')
 flags.DEFINE_float('wd', 1e-4, 'weight_decay')
 flags.DEFINE_float('lr', 3e-4, 'learning_rate')
 flags.DEFINE_string('name', 'Masked_VAE', 'Model name')
+flags.DEFINE_string('params_dir', 'weights', 'directory where models parameters are saved')
 flags.DEFINE_string('dataset', 'ROSE', 'Name of the dataset')
 flags.DEFINE_bool('var', True, 'calculate variance of the dataset')
-
-
-def prepare_data(inputpath, sequece_length):       
-    data = dict()
-    max_val = 0.0
-    min_val = 0.0
-    cnt = 0
-    for root, dirs, files in os.walk(inputpath):
-        try:
-            name, ext = os.path.splitext(files[0])
-        except:
-            continue
-        else:
-            if ext not in ['.json'] or not '3dcoords' in  root:
-                #print('The files in folder are not images!')
-                continue
-
-        for f in files:
-            path_json = os.path.join(root, f)
-
-            with open(path_json, "r") as read_file:
-                results = json.load(read_file)
-                size = len(results) // sequece_length
-                if not size:
-                    print(f'Warning: number of frames in the folder {root} is not compatible ', 
-                          f'with the number of frames in json ({sequece_length} / {len(results)}) ',
-                          f'this pair will be excluded from dataset')
-                pass
-                max_val = np.array([np.array(results).max(), max_val]).max()
-                min_val = np.array([np.array(results).min(), min_val]).min()
-                start = 0
-                for i in range(size):
-                    data[cnt] = results[start:start+sequece_length]
-                    start += sequece_length
-                    cnt +=1
-        print(f'Source {root} containing {len(files)} files was handled. The dataset size has {cnt} examples now')
-
-    with open('3dcoodrs.pickle', 'wb') as handle:
-        pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-    with open('3dcoodrs.pickle', 'rb') as handle:
-        restored = pickle.load(handle)
-
-    assert data == restored, True
-
-    return data, max_val, min_val
+flags.DEFINE_bool('pretrained', True, 'load pretrained parameters to the model')
 
 
 def train(argv):
@@ -121,6 +77,9 @@ def train(argv):
     model = MaskedAE(arguments)
     
     states = model.init_params(rng, next(iter(train_loader))[:-1])
+    if FLAGS.pretrained:
+        states = load(FLAGS.params_dir)
+    min_loss = np.inf
     #motion2video_3d(data[0].transpose((1,2,0)), './output/file.mp4')
     for i in count():
         train_losses, test_losses = [], []
@@ -134,8 +93,12 @@ def train(argv):
             train_losses.append(jax.device_get(loss["reconst_loss"]))
             cls_train.append(jax.device_get(loss["classif_loss"]))
 
-        train_pred = jnp.argmax(loss['logits'], axis=-1)
-        train_accuracy = jnp.mean(train_pred == pose[-2]).item()
+        # train_pred = jnp.argmax(loss['logits'], axis=-1)
+        # train_accuracy = jnp.mean(train_pred == pose[-2]).item()
+        current_loss = np.mean(train_losses)
+        if min_loss > current_loss:
+            min_loss = current_loss
+            # save(FLAGS.params_dir, states)
 
         for step, pose in enumerate(test_loader):
 
@@ -146,49 +109,50 @@ def train(argv):
             test_losses.append(jax.device_get(test_loss["reconst_loss"]))
             cls_test.append(jax.device_get(test_loss["classif_loss"]))
 
-        predictions = jnp.argmax(test_loss['logits'], axis=-1)
-        class_accuracy = jnp.mean(predictions == pose[-2]).item()
+        # predictions = jnp.argmax(test_loss['logits'], axis=-1)
+        # class_accuracy = jnp.mean(predictions == pose[-2]).item()
 
         print(f'Epoch {i} REC: tr_loss: {np.mean(train_losses):.5f} | ts_loss: {np.mean(test_losses):.5f} '
-              f'CLS: tr_loss: {np.mean(cls_train):.5f} | ts_loss: {np.mean(cls_test):.5f} '
-              f'| tr_acc: {train_accuracy:.5f} | ts_acc: {class_accuracy:.5f}')
+            #   f'CLS: tr_loss: {np.mean(cls_train):.5f} | ts_loss: {np.mean(cls_test):.5f} '
+            #   f'| tr_acc: {train_accuracy:.5f} | ts_acc: {class_accuracy:.5f}'
+            )
 
-        idx = np.random.choice(FLAGS.batch)
-        padding = int(pose[-1][idx] // FLAGS.skeleton_joints)
-        test_loss = jax.device_get(test_loss)
+        # idx = np.random.choice(FLAGS.batch)
+        # padding = int(pose[-1][idx] // FLAGS.skeleton_joints)
+        # test_loss = jax.device_get(test_loss)
         
-        masked = test_loss['patches'][idx]
-        masked = np.reshape(masked, (-1, FLAGS.skeleton_joints, FLAGS.num_points * FLAGS.complex))[:padding, ...]        
+        # masked = test_loss['patches'][idx]
+        # masked = np.reshape(masked, (-1, FLAGS.skeleton_joints, FLAGS.num_points * FLAGS.complex))[:padding, ...]        
 
-        masked = ((masked + 1.0) / 2.0) * (max_val - min_val) + min_val
-        masked = get_poinsts_from_joints_complex(masked, FLAGS.skeleton_points, 
-                                            padding, 
-                                            FLAGS.skeleton_joints, 
-                                            FLAGS.num_points)
+        # masked = ((masked + 1.0) / 2.0) * (max_val - min_val) + min_val
+        # masked = get_poinsts_from_joints_complex(masked, FLAGS.skeleton_points, 
+        #                                     padding, 
+        #                                     FLAGS.skeleton_joints, 
+        #                                     FLAGS.num_points)
 
-        outputs = test_loss['decoder_outputs'][idx]
-        outputs = np.reshape(outputs, (-1, FLAGS.skeleton_joints, FLAGS.num_points * FLAGS.complex))[:padding, ...]
-        outputs = ((outputs + 1.0) / 2.0) * (max_val - min_val) + min_val
-        outputs = get_poinsts_from_joints_complex(outputs, FLAGS.skeleton_points, 
-                                            padding, 
-                                            FLAGS.skeleton_joints, 
-                                            FLAGS.num_points)
+        # outputs = test_loss['decoder_outputs'][idx]
+        # outputs = np.reshape(outputs, (-1, FLAGS.skeleton_joints, FLAGS.num_points * FLAGS.complex))[:padding, ...]
+        # outputs = ((outputs + 1.0) / 2.0) * (max_val - min_val) + min_val
+        # outputs = get_poinsts_from_joints_complex(outputs, FLAGS.skeleton_points, 
+        #                                     padding, 
+        #                                     FLAGS.skeleton_joints, 
+        #                                     FLAGS.num_points)
         
-        original = pose[0][idx]
-        original = np.reshape(original, (-1, FLAGS.skeleton_joints, FLAGS.num_points * FLAGS.complex))[:padding, ...]
-        original = ((original + 1.0) / 2.0) * (max_val - min_val) + min_val
-        original = get_poinsts_from_joints_complex(original, FLAGS.skeleton_points, 
-                                            padding, 
-                                            FLAGS.skeleton_joints, 
-                                            FLAGS.num_points)
-        motion2video_3d(outputs, 
-                        masked, 
-                        original, 
-                        FLAGS.dataset,
-                        f'./output_ROSE/outputs_epoch_{i}.mp4', 
-                        fps=10, 
-                        unmasked_indexes=test_loss['unmask_indices'][idx]
-                        )
+        # original = pose[0][idx]
+        # original = np.reshape(original, (-1, FLAGS.skeleton_joints, FLAGS.num_points * FLAGS.complex))[:padding, ...]
+        # original = ((original + 1.0) / 2.0) * (max_val - min_val) + min_val
+        # original = get_poinsts_from_joints_complex(original, FLAGS.skeleton_points, 
+        #                                     padding, 
+        #                                     FLAGS.skeleton_joints, 
+        #                                     FLAGS.num_points)
+        # motion2video_3d(outputs, 
+        #                 masked, 
+        #                 original, 
+        #                 FLAGS.dataset,
+        #                 f'./output_BEHAVE/outputs_epoch_{i}.mp4', 
+        #                 fps=10, 
+        #                 unmasked_indexes=test_loss['unmask_indices'][idx]
+        #                 )
 
 
 if __name__ == '__main__':

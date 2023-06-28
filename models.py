@@ -1,7 +1,31 @@
+import os
 import jax
+import pickle
 import haiku as hk
+import numpy as np
 import jax.numpy as jnp
 from typing import Optional
+
+
+def save(ckpt_dir: str, state) -> None:
+    with open(os.path.join(ckpt_dir, "arrays.npy"), "wb") as f:
+        for x in jax.tree_leaves(state):
+            np.save(f, x, allow_pickle=False)
+
+    tree_struct = jax.tree_map(lambda t: 0, state)
+    with open(os.path.join(ckpt_dir, "tree.pkl"), "wb") as f:
+        pickle.dump(tree_struct, f)
+
+
+def load(ckpt_dir):
+    with open(os.path.join(ckpt_dir, "tree.pkl"), "rb") as f:
+        tree_struct = pickle.load(f)
+
+    leaves, treedef = jax.tree_util.tree_flatten(tree_struct)
+    with open(os.path.join(ckpt_dir, "arrays.npy"), "rb") as f:
+        flat_state = [np.load(f) for _ in leaves]
+
+    return jax.tree_util.tree_unflatten(treedef, flat_state)
 
 
 class SelfAttention(hk.MultiHeadAttention):
@@ -224,14 +248,18 @@ class Decoder(hk.Module):
         # x = x * jnp.tile(jnp.expand_dims(attention_mask, axis=-1), (1, 1, x.shape[-1]))
         x = jnp.where(jnp.expand_dims(attention_mask, axis=-1), x, 0.)
         flattened = hk.Flatten(name='DecFlat')(x)
-        logits = hk.Linear(self.num_patches*self.patch_dim)(flattened)
+        logits = hk.Linear(self.num_patches*self.patch_dim, 
+                           name='ReconstLogits')(flattened)
         predict = jax.nn.tanh(logits)
         predict = jnp.reshape(predict, (-1, self.num_patches, self.patch_dim))
-        import numpy as np
-        cls_logits = hk.Linear(self.num_classes, b_init=hk.initializers.Constant(-np.log((1.-0.01)/0.01)))(flattened)  # b_init=hk.initializers.Constant(-np.log((1.-0.01)/0.01)) 
+        cls_logits = hk.Linear(self.num_classes, 
+                            #    b_init=hk.initializers.Constant(-np.log((1.-0.01)/0.01)),
+                               name='ClassificationLogits')(flattened)  
         # classifier_loss = jnp.mean(cross_entropy_loss(labels, cls_logits, self.num_classes))
-        classifier_loss = focal_loss(num_classes=self.num_classes)(labels, cls_logits)
-        # classifier_loss = smoothed_loss(labels, cls_logits, self.num_classes)
+        # classifier_loss = focal_loss(num_classes=self.num_classes)(labels, cls_logits)
+        classifier_loss = smoothed_loss(labels, cls_logits, self.num_classes)
+
+
 
 
         # # x = x * jnp.tile(jnp.expand_dims(attention_mask, axis=-1), (1, 1, x.shape[-1]))

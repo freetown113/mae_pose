@@ -42,7 +42,10 @@ def create_forward_fn(fns, args):
 
         reconstruction_loss = jnp.mean(jnp.square(masked_input - reconstruced_masked_input)) / args['variance']
 
-        total_loss = reconstruction_loss + classifier_loss
+        if args['dataset'] == 'ROSE':
+            total_loss = reconstruction_loss + classifier_loss
+        elif args['dataset'] == 'BEHAVE':
+            total_loss = reconstruction_loss
 
         return total_loss, dict({
             'reconst_loss': reconstruction_loss,

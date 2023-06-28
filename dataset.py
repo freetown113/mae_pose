@@ -1,7 +1,10 @@
 import numpy as np
 import torch
+import os
 import torchvision.transforms as trfs
 import jax
+import pickle
+import json
 import jax.numpy as jnp
 
 
@@ -126,12 +129,7 @@ def get_poinsts_from_joints(patch, num_pts, seq_length, num_joints, pts):
     return points.transpose((1,2,0))
 
 
-def collate_array(input):
-    out = np.stack(input)
-    return np.reshape(out, (out.shape[0], np.prod(out.shape[1:3]), np.prod(out.shape[3:])))
-
-
-class TupleCollator(object):
+class RoseCollator(object):
     def __init__(self, max_length, mask_portion, num_patches):
         self.max_length = max_length
         self.mask_proportion = mask_portion
@@ -175,6 +173,30 @@ class TupleCollator(object):
         return poses, mask, mask_indices, unmask_indices, labels, np.asarray(lengths, dtype=np.uint16)
 
 
+class BehaveCollator(RoseCollator):
+    def __init__(self, max_length, mask_portion, num_patches):
+        super().__init__(max_length, mask_portion, num_patches)
+        self.labels = None
+
+    def __call__(self, input):
+        if self.labels is None:
+            self.labels = np.random.randint(0, 120, size=len(input))
+
+        lengths = [input[0].shape[0] * input[0].shape[1]] * len(input)
+        mask_indices, unmask_indices = self.randon_sample(lengths)
+        batch = jnp.stack(input)
+        
+        padded = jax.lax.pad(batch, padding_config=[(0, 0, 0), (0, self.max_length - batch.shape[1], 0), 
+                                                    (0, 0, 0), (0, 0, 0), (0, 0, 0)], 
+                                                    padding_value=0.0)
+
+        poses = jnp.reshape(padded, (padded.shape[0], np.prod(padded.shape[1:3]), np.prod(padded.shape[-2:])))
+        mask = (poses != 0)
+
+        return poses, mask, mask_indices, unmask_indices, self.labels, np.asarray(lengths, dtype=np.uint16)
+
+
+
 class DatasetRose(Dataset):
     def __init__(self, data, pts, skeleton, seq_length, min_val, max_val, transforms=None):
         self.data = data
@@ -199,7 +221,116 @@ class DatasetRose(Dataset):
 
         return pose, lable
 
-        
+
+def get_loader_train_test(data, cfg, max_val, min_val, aux_transform=False):
+    print(f'Max/ min values is {max_val}/ {min_val}')
+    if aux_transform:
+        transf = trfs.Compose([lambda x: np.rot90(),
+                               lambda x: np.fliplr(),
+                               lambda x: np.flipup(),
+                               lambda x: (x - min_val) / (max_val - min_val),
+                               lambda x: x * 2 - 1.0
+            ])
+    else:
+        transf = trfs.Compose([lambda x: (x - min_val) / (max_val - min_val),
+                               lambda x: x * 2 - 1.0,
+                               
+            ])
+
+    idxs = np.random.choice(len(data), int(len(data)*0.1), replace=False)
+    data_test = {i: data[idx] for i, idx in enumerate(idxs)}
+    data_train = dict()
+    cnt = 0
+    for idx in data.keys() if type(data) is dict else range(len(data)):
+        if idx not in idxs:
+            data_train[cnt] = data[idx]
+            cnt += 1
+
+    if cfg.dataset == 'ROSE':
+        DatasetClass = DatasetRose
+        collate_fn = RoseCollator(cfg.max_length, cfg.mask_proportion, cfg.max_length * cfg.skeleton_joints)
+    elif cfg.dataset == 'BEHAVE':
+        DatasetClass = Dataset
+        collate_fn = BehaveCollator(cfg.max_length, cfg.mask_proportion, cfg.max_length * cfg.skeleton_joints)  # collate_array
+    else:
+        raise NotImplementedError(f'The dataset class is not implemented for the type you provide {cfg.dataset}')        
+
+    traindata = DatasetClass(data_train, 
+                             cfg.num_points, 
+                             cfg.skeleton_points, 
+                             cfg.seq_length, 
+                             min_val, 
+                             max_val, 
+                             transforms=transf)
+    variance = traindata.compute_variance(True)
+
+    testdata = DatasetClass(data_test, 
+                            cfg.num_points, 
+                            cfg.skeleton_points, 
+                            cfg.seq_length, 
+                            min_val, 
+                            max_val, 
+                            transforms=transf)
+    
+    loader_train = torch.utils.data.DataLoader(dataset=traindata,
+                                            batch_size=cfg.batch, 
+                                            collate_fn=collate_fn,
+                                            shuffle=True, drop_last=True)
+    
+    loader_test = torch.utils.data.DataLoader(dataset=testdata,
+                                            batch_size=cfg.batch, 
+                                            collate_fn=collate_fn,
+                                            shuffle=False, drop_last=True)
+    
+    return loader_train, loader_test, variance
+
+
+
+def prepare_data(inputpath, sequece_length):       
+    data = dict()
+    max_val = 0.0
+    min_val = 0.0
+    cnt = 0
+    for root, dirs, files in os.walk(inputpath):
+        try:
+            name, ext = os.path.splitext(files[0])
+        except:
+            continue
+        else:
+            if ext not in ['.json'] or not '3dcoords' in  root:
+                #print('The files in folder are not images!')
+                continue
+
+        for f in files:
+            path_json = os.path.join(root, f)
+
+            with open(path_json, "r") as read_file:
+                results = json.load(read_file)
+                size = len(results) // sequece_length
+                if not size:
+                    print(f'Warning: number of frames in the folder {root} is not compatible ', 
+                          f'with the number of frames in json ({sequece_length} / {len(results)}) ',
+                          f'this pair will be excluded from dataset')
+                pass
+                max_val = np.array([np.array(results).max(), max_val]).max()
+                min_val = np.array([np.array(results).min(), min_val]).min()
+                start = 0
+                for i in range(size):
+                    data[cnt] = results[start:start+sequece_length]
+                    start += sequece_length
+                    cnt +=1
+        print(f'Source {root} containing {len(files)} files was handled. The dataset size has {cnt} examples now')
+
+    with open('3dcoodrs.pickle', 'wb') as handle:
+        pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    with open('3dcoodrs.pickle', 'rb') as handle:
+        restored = pickle.load(handle)
+
+    assert data == restored, True
+
+    return data, max_val, min_val
+
 
 # def get_loader(data, cfg, max_val, min_val, aux_transform=False):
 #     print(f'Max/ min values is {max_val}/ {min_val}')
@@ -232,67 +363,3 @@ class DatasetRose(Dataset):
 #                                             shuffle=True, drop_last=True)
     
 #     return dataloader, variance
-
-
-
-def get_loader_train_test(data, cfg, max_val, min_val, aux_transform=False):
-    print(f'Max/ min values is {max_val}/ {min_val}')
-    if aux_transform:
-        transf = trfs.Compose([lambda x: np.rot90(),
-                               lambda x: np.fliplr(),
-                               lambda x: np.flipup(),
-                               lambda x: (x - min_val) / (max_val - min_val),
-                               lambda x: x * 2 - 1.0
-            ])
-    else:
-        transf = trfs.Compose([lambda x: (x - min_val) / (max_val - min_val),
-                               lambda x: x * 2 - 1.0,
-                               
-            ])
-
-    idxs = np.random.choice(len(data), int(len(data)*0.1), replace=False)
-    data_test = {i: data[idx] for i, idx in enumerate(idxs)}
-    data_train = dict()
-    cnt = 0
-    for idx in data.keys() if type(data) is dict else range(len(data)):
-        if idx not in idxs:
-            data_train[cnt] = data[idx]
-            cnt += 1
-
-    if cfg.dataset == 'ROSE':
-        DatasetClass = DatasetRose
-        collate_fn = TupleCollator(cfg.max_length, cfg.mask_proportion, cfg.max_length * cfg.skeleton_joints)
-    elif cfg.dataset == 'BEHAVE':
-        DatasetClass = Dataset
-        collate_fn = collate_array
-    else:
-        raise NotImplementedError(f'The dataset class is not implemented for the type you provide {cfg.dataset}')        
-
-    traindata = DatasetClass(data_train, 
-                             cfg.num_points, 
-                             cfg.skeleton_points, 
-                             cfg.seq_length, 
-                             min_val, 
-                             max_val, 
-                             transforms=transf)
-    variance = traindata.compute_variance(True)
-
-    testdata = DatasetClass(data_test, 
-                            cfg.num_points, 
-                            cfg.skeleton_points, 
-                            cfg.seq_length, 
-                            min_val, 
-                            max_val, 
-                            transforms=transf)
-    
-    loader_train = torch.utils.data.DataLoader(dataset=traindata,
-                                            batch_size=cfg.batch, 
-                                            collate_fn=collate_fn,
-                                            shuffle=True, drop_last=True)
-    
-    loader_test = torch.utils.data.DataLoader(dataset=testdata,
-                                            batch_size=cfg.batch, 
-                                            collate_fn=collate_fn,
-                                            shuffle=False, drop_last=True)
-    
-    return loader_train, loader_test, variance
